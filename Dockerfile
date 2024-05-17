@@ -1,11 +1,13 @@
-FROM node:14
+FROM node:16-alpine3.18 as builder
 
-WORKDIR /app
+RUN apk add --no-cache --virtual .build-deps git && \
+    git clone https://github.com/journey-ad/Moe-Counter.git /usr/local/Moe-Counter && \
+    cd /usr/local/Moe-Counter && \
+    yarn install && \
+    apk del .build-deps 
 
-COPY . .
-
-RUN yarn install
-
-EXPOSE 3000
-
-CMD ["yarn", "start"]
+FROM node:16-alpine3.18
+LABEL MAINTAINER="ilkeiii"
+WORKDIR /usr/local/Moe-Counter
+COPY --from=builder /usr/local/Moe-Counter ./
+ENTRYPOINT ["yarn", "start"]
