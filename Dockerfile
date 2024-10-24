@@ -7,7 +7,7 @@ RUN apk add --no-cache --virtual .build-deps git && \
     apk del .build-deps 
 
 FROM node:16-alpine3.18
-LABEL MAINTAINER="ilkeiii"
+LABEL MAINTAINER="1lkei"
 WORKDIR /usr/local/Moe-Counter
 COPY --from=builder /usr/local/Moe-Counter ./
 ENTRYPOINT ["yarn", "start"]
