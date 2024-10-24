@@ -1,125 +1,152 @@
-'use strict'
+"use strict";
 
-const fs = require('fs')
-const config = require('config-yml')
-const express = require('express')
-const compression = require('compression')
+const config = require("config-yml");
+const express = require("express");
+const compression = require("compression");
+const { z } = require("zod");
 
-const db = require('./db')
-const themify = require('./utils/themify')
+const db = require("./db");
+const { themeList, getCountImage } = require("./utils/themify");
+const { ZodValid } = require("./utils/zod");
+const { randomArray } = require("./utils");
 
-const PLACES = 7
+const app = express();
 
-const app = express()
-
-app.use(express.static('assets'))
-app.use(compression())
-app.set('view engine', 'pug')
+app.use(express.static("assets"));
+app.use(compression());
+app.set("view engine", "pug");
 
 app.get('/', (req, res) => {
   const site = config.app.site || `${req.protocol}://${req.get('host')}`
-  res.render('index', { site })
+  res.render('index', {
+    site,
+    themeList,
+  })
 });
 
 // get the image
-app.get('/get/@:name', async (req, res) => {
-  const { name } = req.params
-  const { theme = 'moebooru' } = req.query
-  let length = PLACES
-
-  // This helps with GitHub's image cache 
-  res.set({
-    'content-type': 'image/svg+xml',
-    'cache-control': 'max-age=0, no-cache, no-store, must-revalidate'
-  })
-
-  const data = await getCountByName(name)
-
-  if (name === 'demo') {
-    res.set({
-      'cache-control': 'max-age=31536000'
+app.get(["/@:name", "/get/@:name"],
+  ZodValid({
+    params: z.object({
+      name: z.string().max(32),
+    }),
+    query: z.object({
+      theme: z.string().default("moebooru"),
+      padding: z.coerce.number().min(0).max(32).default(7),
+      offset: z.coerce.number().min(-500).max(500).default(0),
+      scale: z.coerce.number().min(0.1).max(2).default(1),
+      pixelated: z.enum(["0", "1"]).default("1"),
+      darkmode: z.enum(["0", "1", "auto"]).default("auto")
     })
-    length = 10
+  }),
+  async (req, res) => {
+    const { name } = req.params;
+    let { theme = "moebooru", ...rest } = req.query;
+
+    // This helps with GitHub's image cache
+    res.set({
+      "content-type": "image/svg+xml",
+      "cache-control": "max-age=0, no-cache, no-store, must-revalidate",
+    });
+
+    const data = await getCountByName(name);
+
+    if (name === "demo") {
+      res.set("cache-control", "max-age=31536000");
+    }
+
+    if (theme === "random") {
+      theme = randomArray(Object.keys(themeList));
+    }
+
+    // Send the generated SVG as the result
+    const renderSvg = getCountImage({
+      count: data.num,
+      theme,
+      ...rest
+    });
+
+    res.send(renderSvg);
+
+    console.log(
+      data,
+      `theme: ${theme}`,
+      `ip: ${req.headers['x-forwarded-for'] || req.connection.remoteAddress}`,
+      `ref: ${req.get("Referrer") || null}`,
+      `ua: ${req.get("User-Agent") || null}`
+    );
   }
-
-  // Send the generated SVG as the result
-  const renderSvg = themify.getCountImage({ count: data.num, theme, length })
-  res.send(renderSvg)
-
-  console.log(data, `theme: ${theme}`, `ref: ${req.get('Referrer') || null}`, `ua: ${req.get('User-Agent') || null}`)
-})
+);
 
 // JSON record
-app.get('/record/@:name', async (req, res) => {
-  const { name } = req.params
+app.get("/record/@:name", async (req, res) => {
+  const { name } = req.params;
 
-  const data = await getCountByName(name)
+  const data = await getCountByName(name);
 
-  res.json(data)
-})
+  res.json(data);
+});
 
-app.get('/heart-beat', (req, res) => {
-  res.set({
-    'cache-control': 'max-age=0, no-cache, no-store, must-revalidate'
-  })
-
-  res.send('alive')
-  console.log('heart-beat')
+app.get("/heart-beat", (req, res) => {
+  res.set("cache-control", "max-age=0, no-cache, no-store, must-revalidate");
+  res.send("alive");
+  console.log("heart-beat");
 });
 
 const listener = app.listen(config.app.port || 3000, () => {
-  console.log('Your app is listening on port ' + listener.address().port)
-})
+  console.log("Your app is listening on port " + listener.address().port);
+});
 
-let __cache_counter = {}, shouldPush = false
+let __cache_counter = {};
+let enablePushDelay = config.db.interval > 0
+let needPush = false;
 
-setInterval(() => {
-  shouldPush = true
-}, 1000 * 60);
+if (enablePushDelay) {
+  setInterval(() => {
+    needPush = true;
+  }, 1000 * config.db.interval);
+}
 
 async function pushDB() {
-  if (!shouldPush) return
+  if (Object.keys(__cache_counter).length === 0) return;
+  if (enablePushDelay && !needPush) return;
 
   try {
-    shouldPush = false
-    if (Object.keys(__cache_counter).length === 0) return
+    needPush = false;
+    console.log("pushDB", __cache_counter);
 
-    console.log("pushDB", __cache_counter)
-
-    const counters = Object.keys(__cache_counter).map(key => {
+    const counters = Object.keys(__cache_counter).map((key) => {
       return {
         name: key,
-        num: __cache_counter[key]
-      }
-    })
+        num: __cache_counter[key],
+      };
+    });
 
-    await db.setNumMulti(counters)
-    __cache_counter = {}
+    await db.setNumMulti(counters);
+    __cache_counter = {};
   } catch (error) {
-    console.log("pushDB is error: ", error)
+    console.log("pushDB is error: ", error);
   }
 }
 
 async function getCountByName(name) {
-  const defaultCount = { name, num: 0 }
+  const defaultCount = { name, num: 0 };
 
-  if (name === 'demo') return { name, num: '0123456789' }
+  if (name === "demo") return { name, num: "0123456789" };
 
   try {
     if (!(name in __cache_counter)) {
-      const counter = await db.getNum(name) || defaultCount
-      __cache_counter[name] = counter.num + 1
+      const counter = (await db.getNum(name)) || defaultCount;
+      __cache_counter[name] = counter.num + 1;
     } else {
-      __cache_counter[name]++
+      __cache_counter[name]++;
     }
 
-    pushDB()
+    pushDB();
 
-    return { name, num: __cache_counter[name] }
-
+    return { name, num: __cache_counter[name] };
   } catch (error) {
-    console.log("get count by name is error: ", error)
-    return defaultCount
-
+    console.log("get count by name is error: ", error);
+    return defaultCount;
   }
 }
